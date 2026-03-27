@@ -1,6 +1,6 @@
 const PEOPLE = {
-  "NORMAL": 2,
-  "STUDENT": 1
+    "NORMAL": 2,
+    "STUDENT": 0
 };
 const SELECTED_DATES = [
     "26",
@@ -10,12 +10,22 @@ const SELECTED_MOVIE_TIMES = [
     "10:30-12:00",
     "13:00-16:00"
 ]; // 시작 시간 기준.
+const SELECTED_SEATS = [
+    "H:13-32",
+    "I:13-32",
+    "J:11-34",
+    "K:11-34",
+    "L:11-34",
+]
 let isContinue = true;
 
 
 /**
  * Define functions and variables
  */
+const targetSeats = new Set();
+let peopleCount = 0;
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -25,19 +35,22 @@ function timeToMinutes(timeStr) {
     return h * 60 + m;
 }
 
-async function waitLoading() {
-    let count = 0
-    // 로딩창 대기
-    while (!document.querySelector('div[class^="loading_"]') && count < 5) {
-        await sleep(100);
-        count++;
-    }
+function prepareSelectedSeats() {
+    for (const _seat of SELECTED_SEATS) {
+        if (!_seat.includes(":")) {
+            targetSeats.add(`${_seat}`)
+            continue;
+        }
 
-    // 로딩 끝나기 대기
-    count = 0;
-    while (document.querySelector('div[class^="loading_"]') && count < 5) {
-        await sleep(100);
-        count++;
+        const [row, range] = _seat.split(":");
+        if (!range) continue;
+
+        const [start, end] = range.split("-").map(n => parseInt(n, 10));
+        if (!start || !end) continue;
+
+        for (let number = start; number <= end; number++) {
+            targetSeats.add(`${row}${number}`)
+        }
     }
 }
 
@@ -83,9 +96,11 @@ async function selectMovieTime() {
 
             if (startMinutes >= timeToMinutes(startRange) && startMinutes <= timeToMinutes(endRange)) {
                 timeElement.click();
-                await waitLoading();
                 await selectPeopleCount();
                 await nextStep();
+                await selectSeat();
+
+                await sleep(100);
             }
         }
     }
@@ -95,11 +110,36 @@ async function selectMovieTime() {
  * STEP 3. 사람수 선택
  */
 async function selectPeopleCount() {
+    async function waitLoading() {
+        const MAX_COUNT = 10;
+        let count = 0
+        // 로딩창 대기
+        while (!document.querySelector('div[class^="loading_"]') && count < MAX_COUNT) {
+            await sleep(200);
+            count++;
+        }
+
+        if (count >= MAX_COUNT) return false;
+
+        // 로딩 끝나기 대기
+        count = 0;
+        while (document.querySelector('div[class^="loading_"]') && count < MAX_COUNT) {
+            await sleep(200);
+            count++;
+        }
+
+        if (count >= MAX_COUNT) return false;
+
+        return true;
+    }
+
     if (!isContinue) return;
+    if (!(await waitLoading())) return;
 
     const section = document.querySelector('section[class^="cnms01520_personnel"]');
     if (!section) return;
 
+    peopleCount = 0;
     for (const _categoryElement of section.querySelectorAll('[class^="numberChoice_NumberWrap"]')) {
         if (!isContinue) break;
 
@@ -118,8 +158,9 @@ async function selectPeopleCount() {
         if (targetCount <= 0) continue;
         for (const _button of _categoryElement.querySelectorAll('button.btn-num')) {
             if (_button.textContent.trim() === String(targetCount)) {
+                peopleCount += targetCount;
                 _button.click();
-                await sleep(100);
+                await sleep(300);
             }
         }
     }
@@ -129,18 +170,78 @@ async function selectPeopleCount() {
  * STEP 4. 좌선 선택 화면으로 넘어가기
  */
 async function nextStep() {
+    if (!isContinue) return;
+
     const btn = document.querySelector('button[class^="cnms01520_btnBgAnimation"]');
     if (btn) btn.click();
-
-    await selectSeat();
 }
 
 /**
  * STEP 5. 좌석 선택
  */
 async function selectSeat() {
+    async function waitLoading() {
+        // 로딩 끝나기 대기
+        let modal;
+        while (modal = document.querySelector('.cgv-modal.cgv-bot-modal')) {
+            if (modal.classList.contains('active')) break;
+            await sleep(100);
+        }
+        await sleep(300);
+
+        return true;
+    }
+    if (!isContinue) return;
+    if (!(await waitLoading())) return;
+    
     const BUTTON_QUERY = 'button[class*="seatMap_seatNumber"][class*="seatMap_seatNormal"]'
     const SEAT_REGEX = /^(?<seat>[A-Za-z]+)(?<seatNumber>\d+)$/;
+
+    let selectedSeats = []
+    for (const _target of document.querySelectorAll(`${BUTTON_QUERY}:not([class*="seatMap_seatDisabled"], [class*="seatMap_active"])`)) {
+        if (!isContinue) break;
+
+        if (_target.closest(".rzpp-mini-map")) continue;
+        if (!_target.innerText) continue;
+
+        const targetRegex = _target.innerText.match(SEAT_REGEX);
+        const { seat, seatNumber } = targetRegex.groups
+        if (!targetSeats.has(`${seat}${seatNumber}`)) continue;
+
+        if (selectedSeats.length > 0) {
+            const lastSeat = selectedSeats[selectedSeats.length - 1]
+            if (lastSeat.seat != seat || lastSeat.number + 1 != seatNumber) {
+                selectedSeats = []
+            }
+        }
+        selectedSeats.push({ seat: seat, number: parseInt(seatNumber, 10) });
+            
+        if (selectedSeats.length >= peopleCount) break;
+    }
+
+    if (selectedSeats.length >= peopleCount) {
+        for (let i = 0; isContinue && i < selectedSeats.length; i += 2) {
+            let { seat, number } = selectedSeats[i];
+
+            const element = [...document.querySelectorAll(`${BUTTON_QUERY} > span`)]
+                .find(span => span.textContent.trim() === `${seat}${number}`);
+            element.click();
+            await sleep(100);
+        }
+
+        await pay();
+    } else {
+        document.querySelector('.btn-close').click()
+        await sleep(100);
+    }
+}
+
+/**
+ * STEP 6. 결제하기
+ */
+async function pay() {
+    if (!isContinue) return;
+
     const BUTTON_CLICK_STEPS = [
         {
             "type": "EQUAL",
@@ -155,39 +256,6 @@ async function selectSeat() {
             "value": "결제하기"
         },
     ]
-
-    let _targets = document.querySelectorAll(`${BUTTON_QUERY}:not([class*="seatMap_seatDisabled"], [class*="seatMap_active"])`)
-    let selectedSeats = []
-    for (const _target of _targets) {
-        if (!isContinue) break;
-
-        if (_target.closest(".rzpp-mini-map")) continue;
-
-        const targetRegex = _target.innerText.match(SEAT_REGEX);
-        console.log(targetRegex);
-        const { seat, seatNumber } = targetRegex.groups
-
-        if (selectedSeats.length > 0) {
-            const lastSeat = selectedSeats[selectedSeats.length - 1]
-            if (lastSeat.seat != seat || lastSeat.number + 1 != seatNumber) {
-                selectedSeats = []
-            }
-        }
-        selectedSeats.push({ seat: seat, number: parseInt(seatNumber, 10) });
-        
-        if (selectedSeats.length >= count) break;
-    }
-
-    if (selectedSeats.length >= count) {
-        for (let i = 0; isContinue && i < selectedSeats.length; i += 2) {
-            let { seat, number } = selectedSeats[i];
-
-            const element = [...document.querySelectorAll(`${BUTTON_QUERY} > span`)]
-                .find(span => span.textContent.trim() === `${seat}${number}`);
-            element.click();
-            await sleep(100);
-        }
-    }
 
     let cursor = 0;
     let recurse = 0;
@@ -208,7 +276,21 @@ async function selectSeat() {
         }
 
         cursor++;
+        if (cursor == BUTTON_CLICK_STEPS.length) {
+            isContinue = false;
+            await sleep(600);
+        } else {
+            await sleep(300);
+        }
+
         recurse = 0;
         element.click();
     }
+}
+
+
+prepareSelectedSeats();
+while (isContinue) {
+    await selectMovieTime();
+    await sleep(200)
 }
